@@ -1,0 +1,337 @@
+From dbfe75beb10d525d2d87d2cece25fbc980a37f93 Mon Sep 17 00:00:00 2001
+From: Yangyu Lai <laiyanyi@gmail.com>
+Date: Fri, 30 Jan 2026 01:39:39 +0000
+Subject: [PATCH] Update for paper
+
+---
+ libnuma.c         | 48 +++++++++++++++++++++++++++++---
+ numa.h            |  9 +++++-
+ numactl.c         | 70 +++++++++++++++++++++++++++++++++++++++++++++++
+ numaif.h          |  5 +++-
+ syscall.c         | 10 +++++--
+ util.c            |  3 +-
+ versions.ldscript |  3 ++
+ 7 files changed, 139 insertions(+), 9 deletions(-)
+ mode change 100755 => 100644 numactl.c
+
+diff --git a/libnuma.c b/libnuma.c
+index 380e8a6..795e959 100644
+--- a/libnuma.c
++++ b/libnuma.c
+@@ -19,6 +19,7 @@
+    All calls are undefined when numa_available returns an error. */
+ #define _GNU_SOURCE 1
+ #include <stdlib.h>
++#include <stdint.h>
+ #include <stdio.h>
+ #include <unistd.h>
+ #include <string.h>
+@@ -85,7 +86,7 @@ static int has_preferred_many = -1;
+ int numa_exit_on_error = 0;
+ int numa_exit_on_warn = 0;
+ static void set_sizes(void);
+-
++uint8_t *weights =NULL;
+ /*
+  * There are two special functions, _init(void) and _fini(void), which
+  * are called automatically by the dynamic loader whenever a library is loaded.
+@@ -106,7 +107,7 @@ numa_init(void)
+         for (i = 0; i < max; i++)
+                 nodemask_set_compat((nodemask_t *)&numa_all_nodes, i);
+ 	memset(&numa_no_nodes, 0, sizeof(numa_no_nodes));
+-
++	weights = (uint8_t*)malloc((1 << 10)*sizeof(uint8_t));
+ 	/* clear errno */
+ 	errno = 0;
+ }
+@@ -310,8 +311,15 @@ WEAK void numa_warn(int num, char *fmt, ...)
+ 
+ static void setpol(int policy, struct bitmask *bmp)
+ {
+-	if (set_mempolicy(policy, bmp->maskp, bmp->size + 1) < 0)
+-		numa_error("set_mempolicy");
++	if(policy==MPOL_WEIGHTED_INTERLEAVE_PROCESS){
++		if (set_mempolicy_new(policy, bmp->maskp, bmp->size+1,weights) < 0)
++			numa_error("set_mempolicy");
++	}else{
++		if (set_mempolicy(policy, bmp->maskp, bmp->size + 1) < 0){
++			printf("setpol_normal\n");
++			numa_error("set_mempolicy");
++		}
++	}
+ }
+ 
+ static void getpol(int *oldpolicy, struct bitmask *bmp)
+@@ -1071,6 +1079,16 @@ numa_set_weighted_interleave_mask(struct bitmask *bmp)
+ 		setpol(MPOL_WEIGHTED_INTERLEAVE, bmp);
+ }
+ 
++void
++numa_set_weighted_interleave_process_mask(struct bitmask *bmp)
++{
++	if (numa_bitmask_equal(bmp, numa_no_nodes_ptr))
++		setpol(MPOL_DEFAULT, bmp);
++	else
++		setpol(MPOL_WEIGHTED_INTERLEAVE_PROCESS, bmp);
++}
++
++
+ SYMVER("numa_get_interleave_mask_v1", "numa_get_interleave_mask@libnuma_1.1")
+ nodemask_t
+ numa_get_interleave_mask_v1(void)
+@@ -1122,6 +1140,21 @@ numa_get_weighted_interleave_mask(void)
+ 	return bmp;
+ }
+ 
++struct bitmask *
++numa_get_weighted_interleave_process_mask(void)
++{
++	int oldpolicy = 0;
++	struct bitmask *bmp;
++
++	bmp = numa_allocate_nodemask();
++	if (!bmp)
++		return NULL;
++	getpol(&oldpolicy, bmp);
++	if (oldpolicy != MPOL_WEIGHTED_INTERLEAVE_PROCESS)
++		copy_bitmask_to_bitmask(numa_no_nodes_ptr, bmp);
++	return bmp;
++}
++
+ /* (undocumented) */
+ int numa_get_interleave_node(void)
+ {
+@@ -2341,3 +2374,10 @@ int numa_set_mempolicy_home_node(void *start, unsigned long len, int home_node,
+ 
+ 	return 0;
+ }
++void set_process_weight(struct bitmask *nodemask,uint8_t *nweights){
++	int i;
++	memset(weights,0,(1 << 10)); 
++	for(i =0;i< nodemask->size;i++)
++		if (numa_bitmask_isbitset(nodemask, i))
++			*(weights+i) =nweights[i];
++}
+\ No newline at end of file
+diff --git a/numa.h b/numa.h
+index f0b550b..351aafc 100644
+--- a/numa.h
++++ b/numa.h
+@@ -26,6 +26,7 @@
+ #include <string.h>
+ #include <sys/types.h>
+ #include <stdlib.h>
++#include <stdint.h>
+ 
+ #if defined(__x86_64__) || defined(__i386__)
+ #define NUMA_NUM_NODES  128
+@@ -178,12 +179,17 @@ void numa_set_interleave_mask(struct bitmask *nodemask);
+ /* Set the NUMA node weighted interleaving mask. 0 to turn off */
+ void numa_set_weighted_interleave_mask(struct bitmask *nodemask);
+ 
++/* Set the NUMA node weighted interleaving mask. 0 to turn off */
++void numa_set_weighted_interleave_process_mask(struct bitmask *nodemask);
++
+ /* Return the current interleaving mask */
+ struct bitmask *numa_get_interleave_mask(void);
+ 
+ /* Return the current weighted interleaving mask */
+ struct bitmask *numa_get_weighted_interleave_mask(void);
+ 
++struct bitmask *numa_get_weighted_interleave_process_mask(void);
++
+ /* allocate a bitmask big enough for all nodes */
+ struct bitmask *numa_allocate_nodemask(void);
+ 
+@@ -264,7 +270,8 @@ void numa_setlocal_memory(void *start, size_t size);
+ 
+ /* Allocate memory area with current memory policy */
+ void numa_police_memory(void *start, size_t size);
+-
++void set_process_weight(struct bitmask *nodemask,uint8_t *nweights);
++void numa_set_weighted_interleave_process_mask(struct bitmask *bmp);
+ /* Run current task only on nodes in mask */
+ int numa_run_on_node_mask(struct bitmask *mask);
+ /* Run current task on nodes in mask without any cpuset awareness */
+diff --git a/numactl.c b/numactl.c
+old mode 100755
+new mode 100644
+index 15d9877..c473d2b
+--- a/numactl.c
++++ b/numactl.c
+@@ -45,6 +45,7 @@ static struct option opts[] = {
+ 	{"all", 0, 0, 'a'},
+ 	{"interleave", 1, 0, 'i' },
+ 	{"weighted-interleave", 1, 0, 'w' },
++	{"weighted-interleave-process", 1, 0, 'W' },
+ 	{"preferred", 1, 0, 'p' },
+ 	{"preferred-many", 1, 0, 'P' },
+ 	{"cpubind", 1, 0, 'c' },
+@@ -78,6 +79,7 @@ static void usage(void)
+ 	fprintf(stderr,
+ 		"usage: numactl [--all | -a] [--balancing | -b]\n"
+ 		"               [--interleave= | -i <nodes>] [--weighted-interleave= | -w <nodes>]\n"
++		"               [--weighted-interleave-process= | -W <nodes:weight>]\n"
+ 		"               [--preferred= | -p <node>] [--preferred-many= | -P <nodes>]\n"
+ 		"               [--physcpubind= | -C <cpus>] [--cpunodebind= | -N <nodes>]\n"
+ 		"               [--membind= | -m <nodes>] [--localalloc | -l] command args ...\n"
+@@ -538,6 +540,74 @@ int main(int ac, char **av)
+ 			nopolicy();
+ 			numa_balancing = 1;
+ 			break;
++		case 'W': /* --weighted-interleave-process */
++			checknuma();
++			char ids[5000] = {0};  
++			//set weights
++			uint8_t weight[(1<<10)];
++			memset(&weight,1,(1<<10));
++			const char *p = optarg;
++			char good_weight=1;
++			while (*p) {
++				int id = 0, val = 1;  // 預設 value = 1
++
++				// 檢查是否有 ':' 分隔符
++				const char *colon = strchr(p, ':');
++				const char *comma = strchr(p, ',');
++
++				if (colon && (!comma || colon < comma)) {
++					// 有 ':' 且 ':' 在下一個 ',' 前
++					sscanf(p, " %d:%d", &id, &val);
++				} else {
++					// 沒有 ':'，只提取 index，value 預設為 1
++					sscanf(p, " %d", &id);
++				}
++
++				if (id >= 0 && id < (1<<10)) {
++					weight[id] = (unsigned char)val;
++				} else {
++					good_weight = 0;
++				}
++
++				// 拼接 id 字符串
++				char tmp[20];
++				sprintf(tmp, "%d,", id);
++				strcat(ids, tmp);
++
++				// 跳到下一個逗號
++				while (*p && *p != ',') p++;
++				if (*p == ',') p++;
++			}
++			int len = strlen(ids);
++			if (len > 0 && ids[len - 1] == ',') {
++				ids[len - 1] = '\0';
++			}
++			//usage_msg("optarg = %s",ids);
++			if (parse_all)
++				mask = numactl_parse_nodestring(ids, ALL);
++			else
++				mask = numactl_parse_nodestring(ids, CPUSET);
++			if (!mask) {
++				printf ("mask k<%s> is invalid\n", optarg);
++				usage();
++			}
++			if (!good_weight) {
++				printf ("weight <%s> is invalid\n", optarg);
++				usage();
++			}
++			setpolicy(MPOL_WEIGHTED_INTERLEAVE_PROCESS);
++			
++			
++			set_process_weight(mask,&weight);
++			
++			//
++			if (shmfd >= 0)
++				numa_interleave_memory(shmptr, shmlen, mask);
++			else {
++				numa_set_weighted_interleave_process_mask(mask);
++			}
++			checkerror("setting process interleave mask");
++			break;
+ 		case 'w': /* --weighted-interleave */
+ 			weighted_interleave = 1;
+ 			/* fall-through - logic is the same as interleave */
+diff --git a/numaif.h b/numaif.h
+index adbdf9e..ffdde12 100644
+--- a/numaif.h
++++ b/numaif.h
+@@ -14,6 +14,8 @@ extern long mbind(void *start, unsigned long len, int mode,
+ 	const unsigned long *nmask, unsigned long maxnode, unsigned flags);
+ extern long set_mempolicy(int mode, const unsigned long *nmask,
+ 			  unsigned long maxnode);
++extern long set_mempolicy_new(int mode, const unsigned long *nmask,
++			  unsigned long maxnode, const unsigned char *nweight);
+ extern long migrate_pages(int pid, unsigned long maxnode,
+ 			  const unsigned long *frommask,
+ 			  const unsigned long *tomask);
+@@ -32,7 +34,8 @@ extern int set_mempolicy_home_node(void *start, unsigned long len,
+ #define MPOL_LOCAL       4
+ #define MPOL_PREFERRED_MANY   5
+ #define MPOL_WEIGHTED_INTERLEAVE   6
+-#define MPOL_MAX         7
++#define MPOL_WEIGHTED_INTERLEAVE_PROCESS   7
++#define MPOL_MAX         8
+ 
+ /* Flags for set_mempolicy, specified in mode */
+ #define MPOL_F_NUMA_BALANCING	(1 << 13) /* Optimize with NUMA balancing if possible */
+diff --git a/syscall.c b/syscall.c
+index 21367e7..f5c6e26 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -24,7 +24,7 @@
+ #include "util.h"
+ 
+ #define WEAK __attribute__((weak))
+-
++#define __NR_set_mempolicy_new 555
+ #if !defined(__NR_mbind) || !defined(__NR_set_mempolicy) || \
+     !defined(__NR_get_mempolicy) || !defined(__NR_migrate_pages) || \
+     !defined(__NR_move_pages)
+@@ -241,7 +241,13 @@ long WEAK set_mempolicy(int mode, const unsigned long *nmask,
+ 	i = syscall(__NR_set_mempolicy,mode,nmask,maxnode);
+ 	return i;
+ }
+-
++long WEAK set_mempolicy_new(int mode, const unsigned long *nmask,
++                                   unsigned long maxnode,const unsigned char* nweight)
++{
++	long i;
++	i = syscall(__NR_set_mempolicy_new,mode,nmask,maxnode,nweight);
++	return i;
++}
+ long WEAK migrate_pages(int pid, unsigned long maxnode,
+ 	const unsigned long *frommask, const unsigned long *tomask)
+ {
+diff --git a/util.c b/util.c
+index 2c42284..eab8fea 100644
+--- a/util.c
++++ b/util.c
+@@ -93,10 +93,11 @@ static struct policy {
+ 	{ "preferred",   MPOL_PREFERRED, },
+ 	{ "default",    MPOL_DEFAULT, 1 },
+ 	{ "weighted-interleave", MPOL_WEIGHTED_INTERLEAVE, },
++	{ "weighted-interleave-process", MPOL_WEIGHTED_INTERLEAVE_PROCESS, },
+ 	{ NULL },
+ };
+ 
+-static char *policy_names[] = { "default", "preferred", "bind", "interleave", "local", "preferred-many", "weighted-interleave" };
++static char *policy_names[] = { "default", "preferred", "bind", "interleave", "local", "preferred-many", "weighted-interleave","weighted-interleave-process" };
+ 
+ char *policy_name(int policy)
+ {
+diff --git a/versions.ldscript b/versions.ldscript
+index 2fd6ebc..3748def 100644
+--- a/versions.ldscript
++++ b/versions.ldscript
+@@ -62,6 +62,9 @@ libnuma_1.1 {
+     numa_warn;
+     numa_exit_on_warn;
+     numa_node_to_cpu_update;
++    set_process_weight;
++    show_process_weight;
++    numa_set_weighted_interleave_process_mask;
+   local:
+     *;
+ };
+-- 
+2.43.0
+

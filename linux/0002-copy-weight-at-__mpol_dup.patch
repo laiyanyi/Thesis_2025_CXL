@@ -1,0 +1,57 @@
+From bc3c9ca1e9489da088f1984217645fba78471c20 Mon Sep 17 00:00:00 2001
+From: lai <laiyanyi880220@gmail.com>
+Date: Mon, 8 Sep 2025 23:22:49 +0800
+Subject: [PATCH 2/2] "copy weight at __mpol_dup"
+
+---
+ .gitignore     |  1 +
+ mm/mempolicy.c | 10 ++++++++--
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index 58fdbb35e..0674e455f 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -176,3 +176,4 @@ sphinx_*/
+ 
+ # Rust analyzer configuration
+ /rust-project.json
++config_back_intel_xeon
+diff --git a/mm/mempolicy.c b/mm/mempolicy.c
+index 53e3e0a0e..6bf622de5 100644
+--- a/mm/mempolicy.c
++++ b/mm/mempolicy.c
+@@ -364,7 +364,7 @@ void __mpol_put(struct mempolicy *pol)
+ 	if (!atomic_dec_and_test(&pol->refcnt))
+ 		return;
+ 	if (pol->mode==MPOL_WEIGHTED_INTERLEAVE_PROCESS)
+-		kfree(pol->process_weight);
++		NODEWEIGHT_FREE(pol->process_weight);
+ 	kmem_cache_free(policy_cache, pol);
+ }
+ 
+@@ -375,7 +375,7 @@ static void mpol_rebind_default(struct mempolicy *pol, const nodemask_t *nodes)
+ static void mpol_reset(struct mempolicy *pol, const nodeweight_t weights)
+ {
+ 	//pr_info("mpol_reset\n");
+-	kfree(pol->process_weight);
++	NODEWEIGHT_FREE(pol->process_weight);
+ 	pol->process_weight = weights;
+ }
+ static void mpol_rebind_nodemask(struct mempolicy *pol, const nodemask_t *nodes)
+@@ -2921,6 +2921,12 @@ struct mempolicy *__mpol_dup(struct mempolicy *old)
+ 		nodemask_t mems = cpuset_mems_allowed(current);
+ 		mpol_rebind_policy(new, &mems);
+ 	}
++	if(old->mode==MPOL_WEIGHTED_INTERLEAVE_PROCESS){
++		NODEWEIGHT_SCRATCH(weights);
++		new->process_weight = weights;
++		memcpy(new->process_weight,old->process_weight,MAX_NUMNODES);
++		//pr_info("copy from %p to %p",old->process_weight,new->process_weight);
++	}
+ 	atomic_set(&new->refcnt, 1);
+ 	return new;
+ }
+-- 
+2.34.1
+
